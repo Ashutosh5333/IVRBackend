@@ -57,6 +57,87 @@ export const transcribeAudio = async (audioUrl: string): Promise<string> => {
 };
 
 // ── Initiate outbound call ────────────────────────────────────
+// export const initiateCall = async (
+//   candidateId: string,
+//   tenantId: string,
+//   initiatedBy: string,
+//   campaignId?: string
+// ): Promise<CallSession> => {
+//   // Distributed lock - prevent duplicate call to same candidate
+//   const lockKey = `call:${candidateId}`;
+//   const locked = await acquireLock(lockKey, 120);
+//   if (!locked) {
+//     throw new AppError('Call already in progress for this candidate', 409);
+//   }
+
+//   try {
+//     const candidate = await queryOne<Candidate>(
+//       'SELECT * FROM candidates WHERE id = $1 AND tenant_id = $2',
+//       [candidateId, tenantId]
+//     );
+//     if (!candidate) throw new AppError('Candidate not found', 404);
+
+//     if (candidate.status === CandidateStatus.CALLING) {
+//       throw new AppError('Candidate is already being called', 409);
+//     }
+
+//      console.log("candidate====>",candidate)
+
+//     // Create call session
+//     const sessionResult = await query<CallSession>(
+//       `INSERT INTO call_sessions (tenant_id, candidate_id, campaign_id, status, initiated_by)
+//        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+//       [tenantId, candidateId, campaignId ?? null, CallStatus.QUEUED, initiatedBy]
+//     );
+//     const session = sessionResult[0];
+
+//     // Update candidate status
+//     await query(
+//       `UPDATE candidates SET status = $1, call_attempts = call_attempts + 1,
+//        last_called_at = NOW() WHERE id = $2`,
+//       [CandidateStatus.CALLING, candidateId]
+//     );
+
+//     // Initiate Twilio call
+//     const call = await twilioClient.calls.create({
+//       to: candidate.phone,
+//       from: process.env.TWILIO_PHONE_NUMBER!,
+//       url: `${BASE_URL}/api/calls/webhook/connect/${session.id}`,
+//       statusCallback: `${BASE_URL}/api/calls/webhook/status/${session.id}`,
+//       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+//       statusCallbackMethod: 'POST',
+//       record: true,
+//       recordingStatusCallback: `${BASE_URL}/api/calls/webhook/recording/${session.id}`,
+//       timeout: 30, // Ring for 30 seconds
+//       machineDetection: 'Enable', // Detect voicemail
+//     });
+
+//     // Save Twilio SID
+//     await query(
+//       'UPDATE call_sessions SET twilio_call_sid = $1, status = $2, started_at = NOW() WHERE id = $3',
+//       [call.sid, CallStatus.INITIATED, session.id]
+//     );
+
+//     // Track in Redis
+//     await setActiveCall(tenantId, candidateId, call.sid);
+
+//     // Emit socket event to HR dashboard
+//     const io = getSocketServer();
+//     io.to(`tenant:${tenantId}`).emit('call:initiated', {
+//       call_session_id: session.id,
+//       candidate_id: candidateId,
+//       status: CallStatus.INITIATED,
+//     });
+
+//     logger.info(`Call initiated: ${call.sid} → ${candidate.phone}`);
+//     return { ...session, twilio_call_sid: call.sid };
+//   } catch (error) {
+//     await releaseLock(lockKey);
+//     throw error;
+//   }
+// };
+
+// ── Initiate outbound call ────────────────────────────────────
 export const initiateCall = async (
   candidateId: string,
   tenantId: string,
@@ -70,6 +151,9 @@ export const initiateCall = async (
     throw new AppError('Call already in progress for this candidate', 409);
   }
 
+  // Track if we updated the candidate status so we know whether to roll it back
+  let statusUpdated = false;
+
   try {
     const candidate = await queryOne<Candidate>(
       'SELECT * FROM candidates WHERE id = $1 AND tenant_id = $2',
@@ -81,6 +165,19 @@ export const initiateCall = async (
       throw new AppError('Candidate is already being called', 409);
     }
 
+    console.log("candidate====>", candidate);
+     
+    // ── NEW FIX: Normalize to Indian E.164 Format ────────────────
+    let cleanPhone = candidate.phone.replace(/\D/g, ''); 
+    if (cleanPhone.startsWith('0')) {
+      cleanPhone = cleanPhone.substring(1); 
+    }
+    if (cleanPhone.length === 10) {
+      cleanPhone = '91' + cleanPhone; 
+    }
+    const formattedPhone = `+${cleanPhone}`; 
+    // ─────────────────────────────────────────────────────────────
+
     // Create call session
     const sessionResult = await query<CallSession>(
       `INSERT INTO call_sessions (tenant_id, candidate_id, campaign_id, status, initiated_by)
@@ -89,16 +186,17 @@ export const initiateCall = async (
     );
     const session = sessionResult[0];
 
-    // Update candidate status
+    // Update candidate status to calling
     await query(
       `UPDATE candidates SET status = $1, call_attempts = call_attempts + 1,
        last_called_at = NOW() WHERE id = $2`,
       [CandidateStatus.CALLING, candidateId]
     );
+    statusUpdated = true;
 
     // Initiate Twilio call
     const call = await twilioClient.calls.create({
-      to: candidate.phone,
+      to: formattedPhone, // formatted clean international string
       from: process.env.TWILIO_PHONE_NUMBER!,
       url: `${BASE_URL}/api/calls/webhook/connect/${session.id}`,
       statusCallback: `${BASE_URL}/api/calls/webhook/status/${session.id}`,
@@ -106,8 +204,8 @@ export const initiateCall = async (
       statusCallbackMethod: 'POST',
       record: true,
       recordingStatusCallback: `${BASE_URL}/api/calls/webhook/recording/${session.id}`,
-      timeout: 30, // Ring for 30 seconds
-      machineDetection: 'Enable', // Detect voicemail
+      timeout: 30, 
+      machineDetection: 'Enable', 
     });
 
     // Save Twilio SID
@@ -127,14 +225,28 @@ export const initiateCall = async (
       status: CallStatus.INITIATED,
     });
 
-    logger.info(`Call initiated: ${call.sid} → ${candidate.phone}`);
+    logger.info(`Call initiated: ${call.sid} → ${formattedPhone}`);
     return { ...session, twilio_call_sid: call.sid };
   } catch (error) {
+    // ── NEW FIX: Rollback database states if Twilio fails ──────────
+    if (statusUpdated) {
+      try {
+        await query(
+          `UPDATE candidates SET status = 'pending', 
+           call_attempts = GREATEST(0, call_attempts - 1) 
+           WHERE id = $1`,
+          [candidateId]
+        );
+      } catch (dbError) {
+        logger.error('Failed to rollback candidate status after failed call initialization', dbError);
+      }
+    }
+    // ─────────────────────────────────────────────────────────────
+
     await releaseLock(lockKey);
     throw error;
   }
 };
-
 // ── TwiML: Initial greeting + first question ──────────────────
 export const buildGreetingTwiML = async (
   sessionId: string,
