@@ -145,30 +145,91 @@ const createResumeWorker = () =>
     { ...bullMQConnection, concurrency: 3, ...WORKER_OPTS }
   );
 
+
 const createTranscriptWorker = () =>
   new Worker<TranscriptJobData>(
     'transcripts',
     async (job: Job<TranscriptJobData>) => {
       const { transcribeAudio, scoreCallSession } = await import('../services/call/call.service');
-      const { query } = await import('../config/database');
+      const { query, queryOne } = await import('../config/database');
+      const { getSocketServer } = await import('../sockets');
 
       const { call_session_id, recording_url } = job.data;
       const transcript = await transcribeAudio(recording_url);
 
-      await query(
-        `UPDATE call_sessions
-         SET transcript = transcript || $1::jsonb
-         WHERE id = $2`,
-        [
-          JSON.stringify([{ speaker: 'candidate', text: transcript, timestamp: Date.now() }]),
-          call_session_id,
-        ]
+      // Fill in the most recently-added empty answer (the placeholder
+      // written synchronously in buildQuestionTwiML) instead of
+      // appending a brand new array entry.
+      const session = await queryOne<{ answers: unknown; tenant_id: string; candidate_id: string }>(
+        'SELECT answers, tenant_id, candidate_id FROM call_sessions WHERE id = $1',
+        [call_session_id]
       );
+
+      if (session?.answers) {
+        const answers = session.answers as Array<{
+          question_id: string;
+          question_text: string;
+          answer: string;
+        }>;
+
+        // Find last entry with an empty answer and fill it
+        for (let i = answers.length - 1; i >= 0; i--) {
+          if (!answers[i].answer) {
+            answers[i].answer = transcript;
+            break;
+          }
+        }
+
+        await query(
+          `UPDATE call_sessions
+           SET answers = $1::jsonb,
+               transcript = COALESCE(transcript, '[]'::jsonb) || $2::jsonb
+           WHERE id = $3`,
+          [
+            JSON.stringify(answers),
+            JSON.stringify([{ speaker: 'candidate', text: transcript, timestamp: Date.now() }]),
+            call_session_id,
+          ]
+        );
+
+        // Live update to HR dashboard
+        const io = getSocketServer();
+        io.to(`tenant:${session.tenant_id}`).emit('call:transcript', {
+          call_session_id,
+          entry: { speaker: 'candidate', text: transcript, timestamp: Date.now() },
+        });
+      }
 
       await scoreCallSession(call_session_id);
     },
     { ...bullMQConnection, concurrency: 5, ...WORKER_OPTS }
   );
+
+  
+// const createTranscriptWorker = () =>
+//   new Worker<TranscriptJobData>(
+//     'transcripts',
+//     async (job: Job<TranscriptJobData>) => {
+//       const { transcribeAudio, scoreCallSession } = await import('../services/call/call.service');
+//       const { query } = await import('../config/database');
+
+//       const { call_session_id, recording_url } = job.data;
+//       const transcript = await transcribeAudio(recording_url);
+
+//       await query(
+//         `UPDATE call_sessions
+//          SET transcript = transcript || $1::jsonb
+//          WHERE id = $2`,
+//         [
+//           JSON.stringify([{ speaker: 'candidate', text: transcript, timestamp: Date.now() }]),
+//           call_session_id,
+//         ]
+//       );
+
+//       await scoreCallSession(call_session_id);
+//     },
+//     { ...bullMQConnection, concurrency: 5, ...WORKER_OPTS }
+//   );
 
 const WORKER_FACTORIES: Record<WorkerName, () => Worker> = {
   calls: createCallWorker,
@@ -177,10 +238,6 @@ const WORKER_FACTORIES: Record<WorkerName, () => Worker> = {
   transcripts: createTranscriptWorker,
 };
 
-// ── Start only the workers listed in ACTIVE_WORKERS env ────────
-// Example .env: ACTIVE_WORKERS=calls,transcripts
-
-// If unset, ALL workers start (production default).
 
 export const startWorkers = (): void => {
   const configured = process.env.ACTIVE_WORKERS;

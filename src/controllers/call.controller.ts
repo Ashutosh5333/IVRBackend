@@ -1,8 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import * as callService from '../services/call/call.service';
-import { scheduleBulkCalls, addCallJob } from '../queues';
+import { scheduleBulkCalls } from '../queues';
 import { sendSuccess, sendError } from '../utils/response';
-import { queryOne } from '../config/database';
+import { queryOne, query } from '../config/database';
 import { Candidate, JobRole } from '../types';
 import { getOrCreateDefaultQuestionSet } from '../services/question/question.service';
 
@@ -53,8 +53,6 @@ export const startBulkCalls = async (
       return;
     }
 
-    // Validate all candidates belong to this tenant
-    const { query } = await import('../config/database');
     const valid = await query<{ id: string }>(
       `SELECT id FROM candidates WHERE id = ANY($1) AND tenant_id = $2 AND status = 'pending'`,
       [candidate_ids, req.user.tenant_id]
@@ -65,7 +63,6 @@ export const startBulkCalls = async (
       return;
     }
 
-    // Get question set or use default
     let qSetId = question_set_id;
     if (!qSetId) {
       const firstCandidate = await queryOne<Candidate>(
@@ -102,6 +99,9 @@ export const startBulkCalls = async (
 // ─────────────────────────────────────────────────────────────
 
 // ── Webhook: Twilio connects call → return greeting TwiML ─────
+// FIX: read question_set_id directly off call_sessions (set at
+// call-creation time in initiateCall). No more re-guessing by
+// tenant+role, which silently failed when no default set existed.
 export const webhookConnect = async (
   req: Request,
   res: Response,
@@ -109,10 +109,11 @@ export const webhookConnect = async (
 ): Promise<void> => {
   try {
     const { sessionId } = req.params;
-    const session = await queryOne<{ id: string; candidate_id: string }>(
-      'SELECT id, candidate_id FROM call_sessions WHERE id = $1',
+    const session = await queryOne<{ id: string; question_set_id: string | null }>(
+      'SELECT id, question_set_id FROM call_sessions WHERE id = $1',
       [sessionId]
     );
+
     if (!session) {
       res.type('text/xml').send(
         `<?xml version="1.0"?><Response><Say>Error. Goodbye.</Say><Hangup/></Response>`
@@ -120,25 +121,14 @@ export const webhookConnect = async (
       return;
     }
 
-    // Get question set for this candidate
-    const candidate = await queryOne<{ job_role: JobRole; tenant_id: string }>(
-      'SELECT job_role, tenant_id FROM candidates WHERE id = $1',
-      [session.candidate_id]
-    );
-
-    const { query } = await import('../config/database');
-    const qSetRows = await query<{ id: string }>(
-      `SELECT id FROM question_sets WHERE tenant_id = $1 AND job_role = $2 AND is_default = true LIMIT 1`,
-      [candidate?.tenant_id, candidate?.job_role]
-    );
-
-    const qSetId = qSetRows[0]?.id;
-    if (!qSetId) {
-      res.type('text/xml').send(callService.buildEndCallTwiML('Thank you for your time. Goodbye.'));
+    if (!session.question_set_id) {
+      res.type('text/xml').send(
+        callService.buildEndCallTwiML('Sorry, no questions were configured for this call. Goodbye.')
+      );
       return;
     }
 
-    const twiml = await callService.buildGreetingTwiML(sessionId, qSetId);
+    const twiml = await callService.buildGreetingTwiML(sessionId, session.question_set_id);
     res.type('text/xml').send(twiml);
   } catch (error) {
     next(error);
@@ -146,6 +136,7 @@ export const webhookConnect = async (
 };
 
 // ── Webhook: Twilio answer recording received ────────────────
+// FIX: same — read question_set_id directly from call_sessions.
 export const webhookAnswer = async (
   req: Request,
   res: Response,
@@ -154,24 +145,23 @@ export const webhookAnswer = async (
   try {
     const { sessionId, questionIndex } = req.params;
     const recordingUrl = (req.body as Record<string, string>).RecordingUrl;
-    const nextIndex = parseInt(questionIndex);
+    const nextIndex = parseInt(questionIndex, 10);
 
-    const session = await queryOne<{ candidate_id: string }>(
-      'SELECT candidate_id FROM call_sessions WHERE id = $1', [sessionId]
-    );
-    const candidate = await queryOne<{ job_role: JobRole; tenant_id: string }>(
-      'SELECT job_role, tenant_id FROM candidates WHERE id = $1', [session?.candidate_id]
+    const session = await queryOne<{ question_set_id: string | null }>(
+      'SELECT question_set_id FROM call_sessions WHERE id = $1',
+      [sessionId]
     );
 
-    const { query } = await import('../config/database');
-    const qSetRows = await query<{ id: string }>(
-      `SELECT id FROM question_sets WHERE tenant_id = $1 AND job_role = $2 AND is_default = true LIMIT 1`,
-      [candidate?.tenant_id, candidate?.job_role]
-    );
+    if (!session?.question_set_id) {
+      res.type('text/xml').send(
+        callService.buildEndCallTwiML('Sorry, a technical issue occurred. Goodbye.')
+      );
+      return;
+    }
 
     const twiml = await callService.buildQuestionTwiML(
       sessionId,
-      qSetRows[0]?.id ?? '',
+      session.question_set_id,
       nextIndex,
       recordingUrl
     );
@@ -223,7 +213,6 @@ export const getCallSessions = async (
   try {
     if (!req.user) { sendError(res, 'Unauthorized', 401); return; }
 
-    const { query } = await import('../config/database');
     const sessions = await query(
       `SELECT cs.*, c.name as candidate_name, c.phone
        FROM call_sessions cs
@@ -249,7 +238,6 @@ export const getCallSession = async (
   try {
     if (!req.user) { sendError(res, 'Unauthorized', 401); return; }
 
-    const { query } = await import('../config/database');
     const sessions = await query(
       `SELECT cs.*, c.name as candidate_name, c.phone, c.job_role
        FROM call_sessions cs

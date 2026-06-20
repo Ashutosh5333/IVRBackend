@@ -202,15 +202,32 @@ export const updateCandidateStatus = async (
 };
 
 // ── Schedule a callback ───────────────────────────────────────
+// export const scheduleCandidateCallback = async (
+//   id: string,
+//   tenantId: string,
+//   scheduledAt: Date
+// ): Promise<void> => {
+//   await query(
+//     `UPDATE candidates SET status = $1, scheduled_call_at = $2
+//      WHERE id = $3 AND tenant_id = $4`,
+//     [CandidateStatus.RESCHEDULED, scheduledAt, id, tenantId]
+//   );
+// };
+
+// Inside your candidateService.scheduleCandidateCallback implementation:
+
 export const scheduleCandidateCallback = async (
-  id: string,
+  candidateId: string,
   tenantId: string,
   scheduledAt: Date
-): Promise<void> => {
+) => {
   await query(
-    `UPDATE candidates SET status = $1, scheduled_call_at = $2
-     WHERE id = $3 AND tenant_id = $4`,
-    [CandidateStatus.RESCHEDULED, scheduledAt, id, tenantId]
+    `UPDATE candidates 
+     SET status = 'pending', 
+         scheduled_call_at = $1, 
+         updated_at = NOW() 
+     WHERE id = $2 AND tenant_id = $3`,
+    [scheduledAt, candidateId, tenantId]
   );
 };
 
