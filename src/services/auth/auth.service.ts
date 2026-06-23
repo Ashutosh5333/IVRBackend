@@ -46,25 +46,7 @@ const generateTokens = (user: User): TokenPair => {
 };
 
 // ── Save refresh token hash to DB ─────────────────────────────
-// const saveRefreshToken = async (userId: string, token: string): Promise<void> => {
-//   const hash = crypto.createHash('sha256').update(token).digest('hex');
-//   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
-//   // Revoke old tokens for this user (keep only last 3 devices)
-//   await query(
-//     `DELETE FROM refresh_tokens WHERE user_id = $1
-//      AND id NOT IN (
-//        SELECT id FROM refresh_tokens WHERE user_id = $1
-//        ORDER BY created_at DESC LIMIT 2
-//      )`,
-//     [userId]
-//   );
-
-//   await query(
-//     'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
-//     [userId, hash, expiresAt]
-//   );
-// };
 // Change signature to accept an optional client
 
 const saveRefreshToken = async (
