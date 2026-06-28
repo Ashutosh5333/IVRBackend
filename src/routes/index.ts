@@ -111,6 +111,8 @@ callRouter.post(
   callCtrl.startBulkCalls
 );
 
+callRouter.get('/:id/recording', authenticate, callCtrl.proxyRecording);
+
 router.use('/calls', callRouter);
 
 // ─────────────────────────────────────────────────────────────

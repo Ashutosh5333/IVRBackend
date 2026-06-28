@@ -144,7 +144,12 @@ export const webhookAnswer = async (
 ): Promise<void> => {
   try {
     const { sessionId, questionIndex } = req.params;
-    const recordingUrl = (req.body as Record<string, string>).RecordingUrl;
+    // const recordingUrl = (req.body as Record<string, string>).RecordingUrl;
+    // const nextIndex = parseInt(questionIndex, 10);
+    const body = req.body as Record<string, string>;
+    const recordingUrl = body.RecordingUrl;
+    const recordingDuration = body.RecordingDuration;
+    const isRetry = req.query.retry === '1';
     const nextIndex = parseInt(questionIndex, 10);
 
     const session = await queryOne<{ question_set_id: string | null }>(
@@ -159,11 +164,16 @@ export const webhookAnswer = async (
       return;
     }
 
+    // const twiml = await callService.buildQuestionTwiML(
+    //   sessionId,
+    //   session.question_set_id,
+    //   nextIndex,
+    //   recordingUrl
+    // );
+
     const twiml = await callService.buildQuestionTwiML(
-      sessionId,
-      session.question_set_id,
-      nextIndex,
-      recordingUrl
+      sessionId, session.question_set_id, nextIndex,
+      recordingUrl, recordingDuration, isRetry
     );
 
     res.type('text/xml').send(twiml);
@@ -251,4 +261,21 @@ export const getCallSession = async (
   } catch (error) {
     next(error);
   }
+};
+
+
+export const proxyRecording = async (
+  req: Request, res: Response, next: NextFunction
+): Promise<void> => {
+  try {
+    if (!req.user) { sendError(res, 'Unauthorized', 401); return; }
+    const sessions = await query<{ recording_url: string; tenant_id: string }>(
+      'SELECT recording_url, tenant_id FROM call_sessions WHERE id = $1',
+      [req.params.id]
+    );
+    const session = sessions[0];
+    if (!session?.recording_url) { sendError(res, 'Recording not found', 404); return; }
+    if (session.tenant_id !== req.user.tenant_id) { sendError(res, 'Forbidden', 403); return; }
+    await callService.streamRecording(session.recording_url, res);
+  } catch (error) { next(error); }
 };

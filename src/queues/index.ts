@@ -155,6 +155,7 @@ const createTranscriptWorker = () =>
       const { getSocketServer } = await import('../sockets');
 
       const { call_session_id, recording_url } = job.data;
+      
       const transcript = await transcribeAudio(recording_url);
 
       // Fill in the most recently-added empty answer (the placeholder
@@ -164,13 +165,20 @@ const createTranscriptWorker = () =>
         'SELECT answers, tenant_id, candidate_id FROM call_sessions WHERE id = $1',
         [call_session_id]
       );
+       
 
       if (session?.answers) {
         const answers = session.answers as Array<{
           question_id: string;
           question_text: string;
           answer: string;
+          recording_url?: string;
         }>;
+
+        const target = answers.find((a) => a.recording_url === recording_url);
+        // if (target) {
+        //   target.answer = transcript || '(Unable to transcribe)';
+        // }
 
         // Find last entry with an empty answer and fill it
         for (let i = answers.length - 1; i >= 0; i--) {

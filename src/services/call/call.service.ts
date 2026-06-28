@@ -1,15 +1,26 @@
-import twilio from 'twilio';
-import axios from 'axios';
-import { query, queryOne } from '../../config/database';
-import { setActiveCall, removeActiveCall, acquireLock, releaseLock } from '../../config/redis';
-import { AppError } from '../../middleware/error.middleware';
+import twilio from "twilio";
+import axios from "axios";
+import { query, queryOne } from "../../config/database";
 import {
-  Candidate, CallSession, CallStatus, CandidateStatus, QuestionSet, Question, JobRole
-} from '../../types';
-import { logger } from '../../utils/logger';
-import { getSocketServer } from '../../sockets';
-import { getOrCreateDefaultQuestionSet } from '../question/question.service';
-import { addTranscriptJob } from '../../queues';
+  setActiveCall,
+  removeActiveCall,
+  acquireLock,
+  releaseLock,
+} from "../../config/redis";
+import { AppError } from "../../middleware/error.middleware";
+import {
+  Candidate,
+  CallSession,
+  CallStatus,
+  CandidateStatus,
+  QuestionSet,
+  Question,
+  JobRole,
+} from "../../types";
+import { logger } from "../../utils/logger";
+import { getSocketServer } from "../../sockets";
+import { getOrCreateDefaultQuestionSet } from "../question/question.service";
+import { addTranscriptJob } from "../../queues";
 
 const twilioClient = twilio(
   process.env.TWILIO_ACCOUNT_SID,
@@ -25,14 +36,18 @@ export const textToSpeech = async (text: string): Promise<string> => {
       `https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_TTS_API_KEY}`,
       {
         input: { text },
-        voice: { languageCode: 'en-IN', name: 'en-IN-Wavenet-D', ssmlGender: 'FEMALE' },
-        audioConfig: { audioEncoding: 'MP3', speakingRate: 0.95, pitch: 0 },
+        voice: {
+          languageCode: "en-IN",
+          name: "en-IN-Wavenet-D",
+          ssmlGender: "FEMALE",
+        },
+        audioConfig: { audioEncoding: "MP3", speakingRate: 0.95, pitch: 0 },
       },
       { timeout: 10000 }
     );
     return response.data.audioContent as string;
   } catch (error) {
-    logger.error('TTS failed', error);
+    logger.error("TTS failed", error);
     throw error;
   }
 };
@@ -50,26 +65,45 @@ export const transcribeAudio = async (audioUrl: string): Promise<string> => {
         username: process.env.TWILIO_ACCOUNT_SID!,
         password: process.env.TWILIO_AUTH_TOKEN!,
       },
-      responseType: 'arraybuffer',
+      responseType: "arraybuffer",
       timeout: 15000,
     });
 
     const response = await axios.post(
-      'https://api.deepgram.com/v1/listen?model=nova-2&language=en-IN&punctuate=true&smart_format=true',
+      "https://api.deepgram.com/v1/listen?model=nova-2&language=en-IN&punctuate=true&smart_format=true",
       audioResponse.data,
       {
         headers: {
           Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
-          'Content-Type': 'audio/mpeg',
+          "Content-Type": "audio/mpeg",
         },
         timeout: 30000,
       }
     );
-    return response.data?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? '';
+    return (
+      response.data?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? ""
+    );
   } catch (error) {
-    logger.error('Deepgram transcription failed', error);
-    return '';
+    logger.error("Deepgram transcription failed", error);
+    return "";
   }
+};
+
+export const streamRecording = async (
+  recordingUrl: string,
+  res: import("express").Response
+): Promise<void> => {
+  const audioResponse = await axios.get(`${recordingUrl}.mp3`, {
+    auth: {
+      username: process.env.TWILIO_ACCOUNT_SID!,
+      password: process.env.TWILIO_AUTH_TOKEN!,
+    },
+    responseType: "stream",
+    timeout: 20000,
+  });
+  res.setHeader("Content-Type", "audio/mpeg");
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  (audioResponse.data as NodeJS.ReadableStream).pipe(res);
 };
 
 // ── Initiate outbound call ────────────────────────────────────
@@ -82,20 +116,20 @@ export const initiateCall = async (
   const lockKey = `call:${candidateId}`;
   const locked = await acquireLock(lockKey, 120);
   if (!locked) {
-    throw new AppError('Call already in progress for this candidate', 409);
+    throw new AppError("Call already in progress for this candidate", 409);
   }
 
   let statusUpdated = false;
 
   try {
     const candidate = await queryOne<Candidate>(
-      'SELECT * FROM candidates WHERE id = $1 AND tenant_id = $2',
+      "SELECT * FROM candidates WHERE id = $1 AND tenant_id = $2",
       [candidateId, tenantId]
     );
-    if (!candidate) throw new AppError('Candidate not found', 404);
+    if (!candidate) throw new AppError("Candidate not found", 404);
 
     if (candidate.status === CandidateStatus.CALLING) {
-      throw new AppError('Candidate is already being called', 409);
+      throw new AppError("Candidate is already being called", 409);
     }
 
     const questionSet = await getOrCreateDefaultQuestionSet(
@@ -104,19 +138,26 @@ export const initiateCall = async (
       initiatedBy
     );
 
-    let cleanPhone = candidate.phone.replace(/\D/g, '');
-    if (cleanPhone.startsWith('0')) {
+    let cleanPhone = candidate.phone.replace(/\D/g, "");
+    if (cleanPhone.startsWith("0")) {
       cleanPhone = cleanPhone.substring(1);
     }
     if (cleanPhone.length === 10) {
-      cleanPhone = '91' + cleanPhone;
+      cleanPhone = "91" + cleanPhone;
     }
     const formattedPhone = `+${cleanPhone}`;
 
     const sessionResult = await query<CallSession>(
       `INSERT INTO call_sessions (tenant_id, candidate_id, campaign_id, status, initiated_by, question_set_id)
        VALUES ($1, $2, $3, $4::varchar, $5, $6) RETURNING *`,
-      [tenantId, candidateId, campaignId ?? null, CallStatus.QUEUED, initiatedBy, questionSet.id]
+      [
+        tenantId,
+        candidateId,
+        campaignId ?? null,
+        CallStatus.QUEUED,
+        initiatedBy,
+        questionSet.id,
+      ]
     );
     const session = sessionResult[0];
 
@@ -129,9 +170,9 @@ export const initiateCall = async (
 
     // Notify frontend immediately — candidate is now "calling"
     const io = getSocketServer();
-    io.to(`tenant:${tenantId}`).emit('candidate:status_updated', {
+    io.to(`tenant:${tenantId}`).emit("candidate:status_updated", {
       candidate_id: candidateId,
-      status: 'calling',
+      status: "calling",
     });
 
     const call = await twilioClient.calls.create({
@@ -139,29 +180,35 @@ export const initiateCall = async (
       from: process.env.TWILIO_PHONE_NUMBER!,
       url: `${BASE_URL}/api/calls/webhook/connect/${session.id}`,
       statusCallback: `${BASE_URL}/api/calls/webhook/status/${session.id}`,
-      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-      statusCallbackMethod: 'POST',
+      statusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
+      statusCallbackMethod: "POST",
       record: true,
       recordingStatusCallback: `${BASE_URL}/api/calls/webhook/recording/${session.id}`,
       timeout: 30,
-      machineDetection: 'Enable',
+      machineDetection: "Enable",
     });
 
     await query(
-      'UPDATE call_sessions SET twilio_call_sid = $1, status = $2::varchar, started_at = NOW() WHERE id = $3',
+      "UPDATE call_sessions SET twilio_call_sid = $1, status = $2::varchar, started_at = NOW() WHERE id = $3",
       [call.sid, CallStatus.INITIATED, session.id]
     );
 
     await setActiveCall(tenantId, candidateId, call.sid);
 
-    io.to(`tenant:${tenantId}`).emit('call:initiated', {
+    io.to(`tenant:${tenantId}`).emit("call:initiated", {
       call_session_id: session.id,
       candidate_id: candidateId,
       status: CallStatus.INITIATED,
     });
 
-    logger.info(`Call initiated: ${call.sid} → ${formattedPhone} (question_set: ${questionSet.id})`);
-    return { ...session, twilio_call_sid: call.sid, question_set_id: questionSet.id } as CallSession;
+    logger.info(
+      `Call initiated: ${call.sid} → ${formattedPhone} (question_set: ${questionSet.id})`
+    );
+    return {
+      ...session,
+      twilio_call_sid: call.sid,
+      question_set_id: questionSet.id,
+    } as CallSession;
   } catch (error) {
     if (statusUpdated) {
       try {
@@ -172,7 +219,10 @@ export const initiateCall = async (
           [candidateId]
         );
       } catch (dbError) {
-        logger.error('Failed to rollback candidate status after failed call initialization', dbError);
+        logger.error(
+          "Failed to rollback candidate status after failed call initialization",
+          dbError
+        );
       }
     }
     await releaseLock(lockKey);
@@ -186,7 +236,7 @@ export const buildGreetingTwiML = async (
   questionSetId: string
 ): Promise<string> => {
   const qSet = await queryOne<QuestionSet>(
-    'SELECT * FROM question_sets WHERE id = $1',
+    "SELECT * FROM question_sets WHERE id = $1",
     [questionSetId]
   );
   if (!qSet || !(qSet.questions as Question[])?.length) {
@@ -211,8 +261,9 @@ export const buildGreetingTwiML = async (
   <Record
     action="${BASE_URL}/api/calls/webhook/answer/${sessionId}/1"
     maxLength="60"
-    timeout="5"
+    timeout="7"
     playBeep="true"
+    trim="trim-silence"
     transcribe="false"
   />
 </Response>`;
@@ -225,26 +276,76 @@ export const buildGreetingTwiML = async (
 // the 401 error before timing out at 30s!). That's your "too slow"
 // symptom. Transcription is now queued to BullMQ and processed in the
 // background; the next question plays immediately.
+
 export const buildQuestionTwiML = async (
   sessionId: string,
   questionSetId: string,
   questionIndex: number,
-  previousRecordingUrl?: string
+  previousRecordingUrl?: string,
+  previousRecordingDuration?: string,
+  retryFlag?: boolean
 ): Promise<string> => {
+  console.log("buildQuestionTwiML called:", {
+    questionIndex,
+    previousRecordingDuration,
+    retryFlag,
+    hasUrl: !!previousRecordingUrl,
+  });
+
   const qSet = await queryOne<QuestionSet>(
-    'SELECT * FROM question_sets WHERE id = $1',
+    "SELECT * FROM question_sets WHERE id = $1",
     [questionSetId]
   );
 
   if (!qSet) {
-    return buildEndCallTwiML('Technical error. Thank you for your time. Goodbye.');
+    return buildEndCallTwiML(
+      "Technical error. Thank you for your time. Goodbye."
+    );
   }
+
+  // const durationSeconds = previousRecordingDuration
+  // ? parseFloat(previousRecordingDuration) : 0;
+  // const hasRealAnswer = durationSeconds >= 1.2;
+
+  // A recording URL means the candidate spoke — that's all we need
+  const durationSecs = previousRecordingDuration
+    ? parseInt(previousRecordingDuration, 10)
+    : 99;
+  const hasRealAnswer = durationSecs >= 3;
+  // const hasRealAnswer = !!previousRecordingUrl;
+
+  console.log('Answer detection:', {
+    questionIndex,
+    recordingDuration: previousRecordingDuration,
+    durationSecs,
+    hasRealAnswer,
+    retryFlag,
+  });
 
   const questions = qSet.questions as Question[];
 
   // Queue transcription instead of blocking on it
   if (previousRecordingUrl && questionIndex > 0) {
     const prevQuestion = questions[questionIndex - 1];
+
+    // Re-ask if silent and not already a retry
+    if (!hasRealAnswer && !retryFlag) {
+      return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Aditi-Neural">Sorry, I didn't catch that. Let me repeat.</Say>
+  <Pause length="1"/>
+  <Say voice="Polly.Aditi-Neural">Question ${questionIndex}: ${prevQuestion?.text ?? ""
+        }</Say>
+  <Record
+    action="${BASE_URL}/api/calls/webhook/answer/${sessionId}/${questionIndex}?retry=1"
+    maxLength="60"
+     timeout="7" playBeep="true"
+     trim="trim-silence"
+      transcribe="false"
+  />
+</Response>`;
+    }
+
     if (prevQuestion) {
       // Store a placeholder immediately so the UI has something,
       // the real transcript fills in moments later via the queue.
@@ -253,11 +354,14 @@ export const buildQuestionTwiML = async (
          SET answers = COALESCE(answers, '[]'::jsonb) || $1::jsonb
          WHERE id = $2`,
         [
-          JSON.stringify([{
-            question_id: prevQuestion.id,
-            question_text: prevQuestion.text,
-            answer: '', // filled in by transcript worker
-          }]),
+          JSON.stringify([
+            {
+              question_id: prevQuestion.id,
+              question_text: prevQuestion.text,
+              answer: "", // filled in by transcript worker
+              recording_url: previousRecordingUrl,
+            },
+          ]),
           sessionId,
         ]
       );
@@ -265,14 +369,14 @@ export const buildQuestionTwiML = async (
       await addTranscriptJob({
         call_session_id: sessionId,
         recording_url: previousRecordingUrl,
-        tenant_id: '', // not required by current worker logic
+        tenant_id: "", // not required by current worker logic
       });
     }
   }
 
   if (questionIndex >= questions.length) {
     return buildEndCallTwiML(
-      'Thank you for answering all the questions. Our HR team will review your responses and get back to you soon. Have a great day!'
+      "Thank you for answering all the questions. Our HR team will review your responses and get back to you soon. Have a great day!"
     );
   }
 
@@ -281,12 +385,15 @@ export const buildQuestionTwiML = async (
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Aditi">Question ${questionNum}: ${currentQuestion.text}</Say>
+  <Say voice="Polly.Aditi">Question ${questionNum}: ${currentQuestion.text
+    }</Say>
   <Record
-    action="${BASE_URL}/api/calls/webhook/answer/${sessionId}/${questionIndex + 1}"
+    action="${BASE_URL}/api/calls/webhook/answer/${sessionId}/${questionIndex + 1
+    }"
     maxLength="60"
-    timeout="5"
+    timeout="7"
     playBeep="true"
+    trim="trim-silence"
     transcribe="false"
   />
 </Response>`;
@@ -316,16 +423,22 @@ export const handleCallStatusUpdate = async (
     queued: CallStatus.QUEUED,
     initiated: CallStatus.INITIATED,
     ringing: CallStatus.RINGING,
-    'in-progress': CallStatus.IN_PROGRESS,
+    "in-progress": CallStatus.IN_PROGRESS,
     completed: CallStatus.COMPLETED,
     failed: CallStatus.FAILED,
     busy: CallStatus.BUSY,
-    'no-answer': CallStatus.NO_ANSWER,
+    "no-answer": CallStatus.NO_ANSWER,
     canceled: CallStatus.FAILED,
   };
 
   const internalStatus = statusMap[twilioStatus] ?? CallStatus.FAILED;
-  const isTerminal = ['completed', 'failed', 'busy', 'no-answer', 'canceled'].includes(twilioStatus);
+  const isTerminal = [
+    "completed",
+    "failed",
+    "busy",
+    "no-answer",
+    "canceled",
+  ].includes(twilioStatus);
 
   await query(
     `UPDATE call_sessions
@@ -333,11 +446,16 @@ export const handleCallStatusUpdate = async (
          duration_seconds = $2,
          ended_at = CASE WHEN $3 THEN NOW() ELSE ended_at END
      WHERE id = $4`,
-    [internalStatus, duration ? parseInt(duration, 10) : null, isTerminal, sessionId]
+    [
+      internalStatus,
+      duration ? parseInt(duration, 10) : null,
+      isTerminal,
+      sessionId,
+    ]
   );
 
   const session = await queryOne<{ candidate_id: string; tenant_id: string }>(
-    'SELECT candidate_id, tenant_id FROM call_sessions WHERE id = $1',
+    "SELECT candidate_id, tenant_id FROM call_sessions WHERE id = $1",
     [sessionId]
   );
   if (!session) return;
@@ -345,10 +463,30 @@ export const handleCallStatusUpdate = async (
   const lockKey = `call:${session.candidate_id}`;
   const io = getSocketServer();
 
+  // FIX Issue 2: dropped call detection
+  const durationSecs = duration ? parseInt(duration, 10) : 0;
+  const isDropped = twilioStatus === "completed" && durationSecs < 20;
+
+  if (isDropped) {
+    const scheduledAt = new Date(Date.now() + 5 * 60 * 1000);
+    await query(
+      `UPDATE candidates SET status = 'rescheduled'::varchar,
+     scheduled_call_at = $1, updated_at = NOW() WHERE id = $2`,
+      [scheduledAt, session.candidate_id]
+    );
+    await removeActiveCall(session.tenant_id, session.candidate_id);
+    await releaseLock(lockKey);
+    io.to(`tenant:${session.tenant_id}`).emit("candidate:status_updated", {
+      candidate_id: session.candidate_id,
+      status: "rescheduled",
+    });
+    return; // stop here, don't fall into completed block
+  }
+
   // ── Only flip candidate status on TERMINAL Twilio statuses.
   // "ringing" / "in-progress" should keep showing "Calling..." —
   // this matches what you asked for.
-  if (twilioStatus === 'completed') {
+  if (twilioStatus === "completed") {
     await query(
       `UPDATE candidates SET status = 'call_done'::varchar, updated_at = NOW() WHERE id = $1`,
       [session.candidate_id]
@@ -356,11 +494,13 @@ export const handleCallStatusUpdate = async (
     await removeActiveCall(session.tenant_id, session.candidate_id);
     await releaseLock(lockKey);
 
-    io.to(`tenant:${session.tenant_id}`).emit('candidate:status_updated', {
+    io.to(`tenant:${session.tenant_id}`).emit("candidate:status_updated", {
       candidate_id: session.candidate_id,
-      status: 'call_done',
+      status: "call_done",
     });
-  } else if (['failed', 'busy', 'no-answer', 'canceled'].includes(twilioStatus)) {
+  } else if (
+    ["failed", "busy", "no-answer", "canceled"].includes(twilioStatus)
+  ) {
     await query(
       `UPDATE candidates SET status = 'no_answer'::varchar, updated_at = NOW() WHERE id = $1`,
       [session.candidate_id]
@@ -368,9 +508,9 @@ export const handleCallStatusUpdate = async (
     await removeActiveCall(session.tenant_id, session.candidate_id);
     await releaseLock(lockKey);
 
-    io.to(`tenant:${session.tenant_id}`).emit('candidate:status_updated', {
+    io.to(`tenant:${session.tenant_id}`).emit("candidate:status_updated", {
       candidate_id: session.candidate_id,
-      status: 'no_answer',
+      status: "no_answer",
     });
   }
   // "queued" / "initiated" / "ringing" / "in-progress" → no candidate
@@ -378,7 +518,7 @@ export const handleCallStatusUpdate = async (
   // in initiateCall(), so the UI correctly shows "Calling..." for the
   // entire duration of the call and only flips once it's truly over.
 
-  io.to(`tenant:${session.tenant_id}`).emit('call:status', {
+  io.to(`tenant:${session.tenant_id}`).emit("call:status", {
     call_session_id: sessionId,
     candidate_id: session.candidate_id,
     status: internalStatus,
@@ -391,17 +531,18 @@ export const handleRecordingReady = async (
   sessionId: string,
   recordingUrl: string
 ): Promise<void> => {
-  await query(
-    'UPDATE call_sessions SET recording_url = $1 WHERE id = $2',
-    [recordingUrl, sessionId]
-  );
+  await query("UPDATE call_sessions SET recording_url = $1 WHERE id = $2", [
+    recordingUrl,
+    sessionId,
+  ]);
   logger.info(`Recording saved for session ${sessionId}`);
 };
 
 // ── Score a completed call session ────────────────────────────
 export const scoreCallSession = async (sessionId: string): Promise<number> => {
   const session = await queryOne<CallSession>(
-    'SELECT * FROM call_sessions WHERE id = $1', [sessionId]
+    "SELECT * FROM call_sessions WHERE id = $1",
+    [sessionId]
   );
   if (!session?.answers) return 0;
 
@@ -414,8 +555,12 @@ export const scoreCallSession = async (sessionId: string): Promise<number> => {
   if (answers.length === 0) return 0;
 
   const answered = answers.filter((a) => a.answer?.trim().length > 0).length;
-  const score = Math.round((answered / answers.length) * 100);
+  // const score = Math.round((answered / answers.length) * 100);
+  const score = Math.min(Math.round((answered / answers.length) * 100), 99);
 
-  await query('UPDATE call_sessions SET score = $1 WHERE id = $2', [score, sessionId]);
+  await query("UPDATE call_sessions SET score = $1 WHERE id = $2", [
+    score,
+    sessionId,
+  ]);
   return score;
 };
